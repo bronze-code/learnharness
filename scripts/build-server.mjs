@@ -99,6 +99,42 @@ for (const extra of ["plugins", "dist", path.join("node_modules", "electron")]) 
 	}
 }
 
+// 2d) Nested-dependency closure for Next's hashed external aliases.
+// .next/node_modules/<pkg>-<hash> is a SYMLINK to the real package. When that
+// package lives in a NESTED node_modules (shiki sits under
+// @streamdown/code/node_modules), its own dependencies (@shikijs/core, …)
+// are its siblings there and resolve only through the link's real path.
+// Windows packaging materializes the link as a plain copy, so the copy
+// resolves upward from .next/node_modules and never reaches those siblings:
+// the packaged server threw "Cannot find package '@shikijs/core'" on render
+// (0.6.1, Windows). Copy the missing siblings next to the alias, where both
+// the link and a materialized copy find them first.
+const aliasRoot = path.join(STANDALONE, ".next", "node_modules");
+const topModules = path.join(STANDALONE, "node_modules");
+const packagesIn = (dir) =>
+	fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+		if (entry.name.startsWith(".")) return [];
+		if (!entry.name.startsWith("@")) return [entry.name];
+		return fs.readdirSync(path.join(dir, entry.name)).map((name) => `${entry.name}/${name}`);
+	});
+if (exists(aliasRoot)) {
+	for (const alias of packagesIn(aliasRoot)) {
+		const aliasPath = path.join(aliasRoot, alias);
+		if (!fs.lstatSync(aliasPath).isSymbolicLink()) continue;
+		const real = fs.realpathSync(aliasPath);
+		// The node_modules directory that holds the real package.
+		const holder = real.slice(0, real.lastIndexOf(`${path.sep}node_modules${path.sep}`) + `${path.sep}node_modules`.length);
+		if (holder === topModules || !holder.startsWith(topModules)) continue;
+		for (const sibling of packagesIn(holder)) {
+			const from = path.join(holder, sibling);
+			const to = path.join(aliasRoot, sibling);
+			if (from === real || exists(to)) continue;
+			copyTree(from, to);
+			console.log(`[build-server] nested dependency of ${alias}: ${sibling}`);
+		}
+	}
+}
+
 // 3) Sanity: the runtime-read prompt assets must be present (the teacher
 //    agent reads them from disk at request time).
 for (const asset of [
