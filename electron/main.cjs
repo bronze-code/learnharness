@@ -259,6 +259,46 @@ function startServer(port) {
 	});
 }
 
+/**
+ * Startup splash. The server child loads for several seconds before it can
+ * answer, and the app window is only created once it does — so a launch
+ * used to show nothing at all in the meantime. This small native window
+ * appears immediately and is closed when the app window paints.
+ *
+ * It is static markup from a data: URL: no preload, no script, and it is
+ * never a trusted app window, so it holds none of the desktop API surface.
+ */
+function openStartupSplash() {
+	const chrome = chromeColors(appearance);
+	// The colors are written into markup: accept plain hex only.
+	const hex = (value, fallback) => (/^#[0-9a-f]{3,8}$/i.test(String(value)) ? value : fallback);
+	const colors = { color: hex(chrome.color, "#141414"), symbolColor: hex(chrome.symbolColor, "#e5e5e5") };
+	const splash = new BrowserWindow({
+		width: 320,
+		height: 120,
+		frame: false,
+		resizable: false,
+		maximizable: false,
+		fullscreenable: false,
+		center: true,
+		show: false,
+		title: "LearnHarness",
+		backgroundColor: colors.color,
+		webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, javascript: false },
+	});
+	const html =
+		`<!doctype html><meta charset="utf-8"><title>LearnHarness</title>` +
+		`<body style="margin:0;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;` +
+		`background:${colors.color};color:${colors.symbolColor};font:13px ui-monospace,Consolas,Menlo,monospace;` +
+		`-webkit-app-region:drag;user-select:none">` +
+		`<div style="font-size:15px;font-weight:600">LearnHarness</div><div style="opacity:.6">Starting…</div></body>`;
+	splash.webContents.on("will-navigate", (event) => event.preventDefault());
+	splash.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+	void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+	splash.once("ready-to-show", () => splash.show());
+	return splash;
+}
+
 /** No "ready" event exists — poll until the server answers (docs-confirmed). */
 function waitUntilUp(url, tries = 150) {
 	return new Promise((resolve, reject) => {
@@ -691,6 +731,8 @@ async function main() {
 	// (guards, menu, single instance).
 	const devUrl = process.env.LH_DEV_URL;
 	const url = devUrl ?? `http://127.0.0.1:${await freePort()}`;
+	// Packaged launches wait on the server child below; say so at once.
+	const splash = devUrl ? null : openStartupSplash();
 	if (!devUrl) {
 		desktopAPISecret = randomBytes(32).toString("hex");
 		const ownedOrigin = new URL(url).origin;
@@ -814,7 +856,14 @@ async function main() {
 	app.on("activate", () => {
 		if (BrowserWindow.getAllWindows().length === 0) reopenWindow();
 	});
-	createWindow(url);
+	const firstWindow = createWindow(url);
+	if (splash) {
+		const closeSplash = () => {
+			if (!splash.isDestroyed()) splash.close();
+		};
+		firstWindow.once("ready-to-show", closeSplash);
+		firstWindow.once("closed", closeSplash);
+	}
 	log(`window open: ${url}`);
 	// Startup + 24h checks stay main-owned and read the current preference.
 	// No renderer subscription is required; late loads retrieve the snapshot.
