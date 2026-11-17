@@ -3,6 +3,7 @@
 import { createContext, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useChatSession } from "@/components/session";
+import { useTranscriptWindow } from "./transcript-window";
 import { usePlugins } from "./plugins";
 import { PluginSubmissionRunner, SubmissionModelEpoch, type SubmissionAttempt } from "./plugin-submission-runner";
 import { submissionImages, type BuiltinSubmissionCapture, type PrepareBuiltinSubmission, type PrepareThinkingSubmission, type PreparePluginQuestionSubmission, type PreparePluginProblemSubmission } from "./plugin-submission-adapters";
@@ -226,6 +227,8 @@ const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayout
 /** The quiet system line (custom-message scheme rendering): centered, muted,
  *  small — the transcript's voice for events that are not speech (wake
  *  scaffolding). */
+const TRANSCRIPT_REVEAL_EVENTS = [kbdEventForChat("find")];
+
 function SystemLine({ children, testId }: { children: React.ReactNode; testId?: string }) {
 	return (
 		<div
@@ -346,6 +349,9 @@ export function Chat({
 	};
 	const textTarget = (): Extract<PluginSubmissionTarget, { type: "text" }> | undefined => surfaceTarget ? { type: "text", sessionId: chatId, sessionKind: kind === "practice" ? "practice" : "teaching", surfaceTarget, channels: ["content"] } : undefined;
 	const scrollContextRef = useRef<StickToBottomContext | null>(null);
+	// Tail-first mounting: the newest parts paint first, older history fills
+	// in during idle time (transcript-window.ts). Find needs all of it.
+	const transcriptWindow = useTranscriptWindow(messages, () => scrollContextRef.current?.scrollRef.current ?? null, TRANSCRIPT_REVEAL_EVENTS);
 	const sourceTextParts = useMemo(() => firstSourceTextParts(messages), [messages]);
 	const sideEntries = useMemo(() => sideEntryPoints(nativeMessages, messages), [nativeMessages, messages]);
 
@@ -1756,6 +1762,8 @@ export function Chat({
 							)}
 
 							{messages.map((m, mi) =>
+								// Not mounted yet: every part of this message sits above the window.
+								(transcriptWindow.offsets[mi] ?? 0) + Math.max(1, m.parts.length) <= transcriptWindow.hidden ? null :
 								m.role === "user" && isSubagentSteer(m) ? (
 									// Sub-agent delivery (wake-pipeline steer): NO message bubble — the
 									// artifact card sits in the transcript column directly, full width
@@ -1875,6 +1883,8 @@ export function Chat({
 									<Message from="assistant" className="max-w-full">
 									<MessageContent className="w-full">
 											{m.parts.map((part, pi) => {
+												// The window's top edge can fall inside a long assistant block.
+												if ((transcriptWindow.offsets[mi] ?? 0) + pi < transcriptWindow.hidden) return null;
 												if (part.pluginProblem) return <ProblemCard key={pi} part={{ ...part, state: part.state ?? "input-available", toolCallId: part.toolCallId ?? "" }} />;
 												if (part.pluginQuestion) return <PluginQuestionPart key={pi} part={part} chatId={chatId} />;
 												const isLastPart = mi === messages.length - 1 && pi === m.parts.length - 1;
